@@ -1,0 +1,85 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Organize game files
+        run: |
+          shopt -s nullglob
+          if [ ! -f www/index.html ]; then
+            NESTED=$(find . -maxdepth 3 -path "*/www/index.html" -not -path "./node_modules/*" | head -1)
+            if [ -n "$NESTED" ]; then
+              DIR=$(dirname "$(dirname "$NESTED")")
+              echo "Moving nested game folder $DIR to the top level"
+              cp -r "$DIR"/. . && rm -rf "$DIR"
+            fi
+          fi
+          if [ ! -f www/index.html ] && [ -f index.html ]; then
+            echo "Rebuilding the www folder from the flat files"
+            mkdir -p www/audio www/icons
+            mv index.html manifest.json www/ || true
+            mv *.wav *.mp3 www/audio/ 2>/dev/null || true
+            mv icon-*.png maskable-512.png www/icons/ 2>/dev/null || true
+          fi
+          if [ ! -f www/index.html ]; then
+            echo "ERROR: www/index.html not found"; ls -la; exit 1
+          fi
+          echo "Game files ready:"; ls www www/audio www/icons
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install packages
+        run: npm install
+
+      - name: Create the Android project
+        run: npx cap add android
+
+      - name: Generate launcher icons
+        run: |
+          SRC=www/icons/icon-512.png
+          RES=android/app/src/main/res
+          if [ -f "$SRC" ] && [ -d "$RES" ]; then
+            grep -rl 'name="ic_launcher_background"' "$RES/values" 2>/dev/null | xargs -r sed -i 's/#[Ff][Ff][Ff][Ff][Ff][Ff]/#030304/g' || true
+            for pair in mdpi:48:108 hdpi:72:162 xhdpi:96:216 xxhdpi:144:324 xxxhdpi:192:432; do
+              d=${pair%%:*}; rest=${pair#*:}; legacy=${rest%%:*}; fg=${rest#*:}
+              dir="$RES/mipmap-$d"; mkdir -p "$dir"
+              convert "$SRC" -resize ${legacy}x${legacy} "$dir/ic_launcher.png"
+              cp "$dir/ic_launcher.png" "$dir/ic_launcher_round.png"
+              inner=$(( fg * 72 / 100 ))
+              convert "$SRC" -resize ${inner}x${inner} -background "#030304" -gravity center -extent ${fg}x${fg} "$dir/ic_launcher_foreground.png"
+            done
+            echo "Launcher icons generated"
+          else
+            echo "WARNING: icon-512.png or the Android res folder is missing, using the default icon"
+          fi
+
+      - name: Build debug APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: 2D-UCN-fan-game-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
